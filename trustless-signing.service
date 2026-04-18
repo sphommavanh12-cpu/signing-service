@@ -1,0 +1,44 @@
+[Unit]
+Description=Trustless Backup Ed25519 Signing Service
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=signing-service
+Group=signing-service
+WorkingDirectory=/opt/signing-service
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/vault/keys
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+WatchdogSec=30s
+LoadCredential=signing_passphrase:/etc/signing-service/passphrase.key
+
+ExecStart=/usr/local/bin/signing-service \\
+  --bind 100.118.135.73 \\
+  --port 9999 \\
+  --status-port 9998
+
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=signing-service
+
+[Install]
+WantedBy=multi-user.target
