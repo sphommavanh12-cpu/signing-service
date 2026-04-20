@@ -1,0 +1,8 @@
+{
+  "artifact_id": "cp7-test-artifact",
+  "requested_by": "layer1-sonny",
+  "hash": "059c0f28eddd34d394cac71564826ccdcd52f2742bd87c3ab803cee645dc5ac1",
+  "signature": "9pqPoGJ7sKvqHIxNEz67+4zA2Xnp5zu9IaFP+Ps/3dihhT+YmGfh7JGXk5BGEDCVznSYUbS2iWK5rEG7sUsACw==",
+  "key_version": "8fbc633d5e9b43e3d02ff43768618643cfaa01b4e937d41a23a7ec4038bfc057",
+  "signed_at": "2026-04-20T19:43:40Z"
+}
