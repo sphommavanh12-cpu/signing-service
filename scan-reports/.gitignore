@@ -1,0 +1,3 @@
+# Scan reports and upload staging files are local output — never commit them.
+*.md
+*.log
