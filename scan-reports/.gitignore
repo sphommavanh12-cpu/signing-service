@@ -1,0 +1,3 @@
+# Scan reports are local output — never commit them.
+*.md
+*.log
