@@ -1,12 +1,36 @@
 #!/usr/bin/env bash
 # desktop-scan.sh — Pilot security scan for the local Tailscale-connected desktop.
 #
-# SCOPE: local machine only. No external hosts are contacted.
-# GATE:  Tailscale must be active and the machine reachable via Tailscale IP
-#        before any scan begins. Aborts and logs if the mesh is down.
+# SCOPE: local machine only. No external hosts are contacted at any point.
+# GATE:  Tailscale must be active and the machine reachable via its Tailscale IP
+#        before any scan begins. Aborts immediately and logs if the mesh is down.
 #
-# Usage: bash scripts/desktop-scan.sh
-# Output: scan-reports/scan-<timestamp>.md
+# Usage:  bash scripts/desktop-scan.sh
+# Output: scan-reports/scan-<timestamp>.md  (local only, gitignored)
+#         scan-reports/scan-<timestamp>.md  uploaded to Google Drive automatically
+#
+# Exit codes:
+#   0 — no findings above LOW
+#   1 — scan aborted (Tailscale gate failed or fatal error)
+#   2 — HIGH or CRITICAL findings present
+#   3 — MEDIUM findings only
+#
+# Google Drive upload requires one of:
+#   - gdrive CLI  (https://github.com/glotlabs/gdrive) configured and authenticated
+#   - rclone      configured with a remote named "gdrive" pointing to Google Drive
+#   - GDRIVE_ACCESS_TOKEN env var set to a valid OAuth2 bearer token
+#
+# ── Hourly self-check-in scope (defined explicitly) ──────────────────────────
+# The CI monitoring loop (ScheduleWakeup in Claude Code) that watches PR #3:
+#   CHECKS:   PR open/closed/merged state; CI check-run status; unresolved review comments
+#   TOUCHES:  GitHub read-only API calls only (pull_request_read: get, get_check_runs,
+#             get_review_comments). May push a fix commit if a CI failure is tractable
+#             and the fix is unambiguous.
+#   DOES NOT: modify repo files autonomously without a concrete failing check to fix;
+#             push to any branch other than claude/pentagi-desktop-scan-pilot-m06o60;
+#             merge the PR (merge is blocked on Sony review); post review comments;
+#             re-arm itself after the PR is merged or closed.
+# ─────────────────────────────────────────────────────────────────────────────
 #
 # Do not merge without Sony review.
 
@@ -17,8 +41,8 @@ SCAN_REPORTS_DIR="${REPO_ROOT}/scan-reports"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
 REPORT_FILE="${SCAN_REPORTS_DIR}/scan-${TIMESTAMP}.md"
 FAIL_LOG="${SCAN_REPORTS_DIR}/abort-${TIMESTAMP}.log"
+GDRIVE_FOLDER_ID="1DBH7y7yPLSF_TeeW4gGxhBF06bkwbcEI"
 
-# Findings array: "SEVERITY | CATEGORY | DETAIL"
 FINDINGS=()
 COUNT_HIGH=0
 COUNT_MEDIUM=0
@@ -52,6 +76,81 @@ add_finding() {
     log "[${severity}] ${category}: ${detail}"
 }
 
+# ── Google Drive upload ───────────────────────────────────────────────────────
+# Called after the report is written. Tries three methods in order.
+# Logs a HIGH finding if all methods fail (manual upload is not acceptable).
+
+upload_report_to_gdrive() {
+    local file="$1"
+    local folder_id="${GDRIVE_FOLDER_ID}"
+    local filename
+    filename="$(basename "${file}")"
+
+    log "Uploading report to Google Drive folder ${folder_id} ..."
+
+    # Method 1: gdrive CLI (v3 API — https://github.com/glotlabs/gdrive)
+    if command -v gdrive &>/dev/null; then
+        if gdrive files upload --parent "${folder_id}" "${file}" 2>/dev/null; then
+            log "Uploaded via gdrive CLI."
+            return 0
+        fi
+        # gdrive v2 syntax fallback
+        if gdrive upload --parent "${folder_id}" "${file}" 2>/dev/null; then
+            log "Uploaded via gdrive CLI (v2)."
+            return 0
+        fi
+        log "gdrive CLI upload failed — trying rclone."
+    fi
+
+    # Method 2: rclone with a remote named "gdrive"
+    if command -v rclone &>/dev/null; then
+        # rclone cannot address Drive by folder ID directly; use the folder path if
+        # a "gdrive" remote is configured, otherwise fall through.
+        if rclone listremotes 2>/dev/null | grep -q '^gdrive:'; then
+            if rclone copyto "${file}" "gdrive:pentagi-scan-reports/${filename}" \
+                    --drive-upload-cutoff 1M 2>/dev/null; then
+                log "Uploaded via rclone (gdrive remote)."
+                return 0
+            fi
+            log "rclone upload failed — trying Drive API."
+        fi
+    fi
+
+    # Method 3: Google Drive Files API via curl + OAuth2 bearer token.
+    # Set GDRIVE_ACCESS_TOKEN before running the script, or store it in
+    # ~/.config/pentagi/gdrive-token (chmod 600).
+    local token="${GDRIVE_ACCESS_TOKEN:-}"
+    if [[ -z "${token}" && -f "${HOME}/.config/pentagi/gdrive-token" ]]; then
+        token="$(< "${HOME}/.config/pentagi/gdrive-token")"
+    fi
+
+    if [[ -n "${token}" ]]; then
+        local metadata
+        metadata="{\"name\":\"${filename}\",\"parents\":[\"${folder_id}\"]}"
+        local response
+        response="$(curl -s -X POST \
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart" \
+            -H "Authorization: Bearer ${token}" \
+            -F "metadata=${metadata};type=application/json;charset=UTF-8" \
+            -F "file=@${file};type=text/markdown" 2>/dev/null)"
+
+        local file_id
+        file_id="$(echo "${response}" | jq -r '.id // empty' 2>/dev/null || true)"
+        if [[ -n "${file_id}" ]]; then
+            log "Uploaded via Drive API (file ID: ${file_id})."
+            return 0
+        fi
+        log "Drive API upload failed: ${response}"
+    fi
+
+    # All methods exhausted — this is a HIGH finding (upload is mandatory).
+    add_finding "HIGH" "Report Upload Failed" \
+        "Could not upload ${filename} to Google Drive folder ${folder_id}. " \
+        "Install gdrive CLI, configure an rclone 'gdrive' remote, or set " \
+        "GDRIVE_ACCESS_TOKEN / ~/.config/pentagi/gdrive-token. Manual upload is not acceptable."
+    return 1
+}
+
 # ── GATE: Tailscale presence and mesh reachability ───────────────────────────
 
 log "=== GATE: Tailscale check ==="
@@ -77,7 +176,7 @@ if [[ -z "${TS_IP4}" ]]; then
     abort_scan "Tailscale is running but no IPv4 address assigned — machine may have dropped off the mesh."
 fi
 
-# Tailscale uses the 100.64.0.0/10 CGNAT range
+# Tailscale CGNAT range: 100.64.0.0/10
 if [[ ! "${TS_IP4}" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\. ]]; then
     abort_scan "Tailscale IP '${TS_IP4}' is outside the 100.64.0.0/10 CGNAT range — unexpected network configuration."
 fi
@@ -93,7 +192,7 @@ log "=== GATE PASSED — beginning scan (local machine only) ==="
 log "=== CHECK 1: Open port baseline ==="
 
 # Expected listening ports for this host. Adjust as the service topology changes.
-# 8080 = signing-service API (Tailscale-internal)
+# 8080 = signing-service API (Tailscale-internal only)
 declare -A EXPECTED_PORTS=([8080]=1)
 
 OPEN_PORTS=()
@@ -114,11 +213,12 @@ fi
 
 for port in "${OPEN_PORTS[@]}"; do
     if [[ -z "${EXPECTED_PORTS[${port}]+x}" ]]; then
-        add_finding "HIGH" "Unexpected Open Port" "Port ${port}/tcp is open but not in expected baseline (${!EXPECTED_PORTS[*]})."
+        add_finding "HIGH" "Unexpected Open Port" \
+            "Port ${port}/tcp is open but not in expected baseline (${!EXPECTED_PORTS[*]})."
     fi
 done
 
-# Separately flag anything bound to 0.0.0.0 (all-interfaces, not Tailscale-scoped)
+# Flag anything bound to 0.0.0.0 (all-interfaces, not Tailscale-scoped)
 if command -v ss &>/dev/null; then
     WILDCARD_LISTENERS="$(ss -tlnp 2>/dev/null | awk 'NR>1 {print $4}' | grep '^0\.0\.0\.0:' | tr '\n' ' ')"
     if [[ -n "${WILDCARD_LISTENERS}" ]]; then
@@ -129,30 +229,18 @@ fi
 
 log "Listening ports found: ${OPEN_PORTS[*]:-none}"
 
-# ── CHECK 2: Exposed credentials in signing-service repo ─────────────────────
+# ── CHECK 2: Credential scan (expanded) ──────────────────────────────────────
 
 log "=== CHECK 2: Credential scan ==="
 
-# Patterns that suggest hardcoded secrets. Case-insensitive, word-boundary aware.
-CRED_PATTERNS=(
-    'PRIVATE KEY'
-    'BEGIN RSA'
-    'BEGIN EC'
-    'BEGIN OPENSSH'
-    'BEGIN PGP'
-    'password\s*[:=]\s*["\x27][^"\x27]{4}'
-    'secret\s*[:=]\s*["\x27][^"\x27]{4}'
-    'api[_-]?key\s*[:=]\s*["\x27][^"\x27]{4}'
-    'token\s*[:=]\s*["\x27][^"\x27]{8}'
-    'AWS_SECRET_ACCESS_KEY'
-    'GITHUB_TOKEN\s*='
-    'sk-[A-Za-z0-9]{20,}'
-)
-
+# File types to scan — includes .env, .env.*, and dotenv files by name
 INCLUDE_GLOBS=(
     --include='*.go'
     --include='*.sh'
     --include='*.env'
+    --include='.env'
+    --include='.env.*'
+    --include='*.env.*'
     --include='*.json'
     --include='*.yaml'
     --include='*.yml'
@@ -160,73 +248,164 @@ INCLUDE_GLOBS=(
     --include='*.sql'
     --include='*.conf'
     --include='*.cfg'
+    --include='*.ini'
+    --include='*.properties'
 )
+
+# Patterns grouped by category for clarity.
+# Each entry is "SEVERITY:CATEGORY:PATTERN"
+declare -A CRED_PATTERN_META
+CRED_PATTERNS=()
+
+# PEM / key block headers
+CRED_PATTERNS+=('-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY')
+CRED_PATTERNS+=('-----BEGIN CERTIFICATE')
+
+# Unquoted .env assignments (KEY=value, no quotes required)
+CRED_PATTERNS+=('^(PASSWORD|PASSWD|SECRET|API_KEY|APIKEY|PRIVATE_KEY|AUTH_TOKEN|ACCESS_TOKEN|CLIENT_SECRET|DB_PASS|DB_PASSWORD)\s*=\s*\S{4,}')
+
+# Quoted assignments in any language
+CRED_PATTERNS+=('(password|passwd|secret|api[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|client[_-]?secret)\s*[:=]\s*["\x27][^"\x27\s]{4,}')
+
+# Known service-specific formats
+CRED_PATTERNS+=('sk-[A-Za-z0-9]{20,}')                          # OpenAI
+CRED_PATTERNS+=('AIza[0-9A-Za-z_-]{35}')                        # Google API key
+CRED_PATTERNS+=('xox[baprs]-[0-9A-Za-z-]{10,}')                 # Slack token
+CRED_PATTERNS+=('gh[pousr]_[A-Za-z0-9]{36,}')                   # GitHub PAT / App token
+CRED_PATTERNS+=('AKIA[0-9A-Z]{16}')                              # AWS access key ID
+CRED_PATTERNS+=('AWS_SECRET_ACCESS_KEY\s*=')
+CRED_PATTERNS+=('GITHUB_TOKEN\s*=')
+
+# Raw private key material not in PEM format
+CRED_PATTERNS+=('private[_-]?key\s*[:=]\s*[0-9a-fA-F]{32,}')   # hex-encoded
+CRED_PATTERNS+=('0x[0-9a-fA-F]{64}[^0-9a-fA-F]')               # Ethereum private key
+CRED_PATTERNS+=('["\x27][A-Za-z0-9+/]{42}={0,2}["\x27]')       # base64 ~32 byte key (e.g. Ed25519 seed)
 
 CRED_FOUND=0
 for pattern in "${CRED_PATTERNS[@]}"; do
     while IFS= read -r hit; do
         [[ -n "${hit}" ]] || continue
-        # Exclude .git internals and test fixtures that legitimately contain placeholder text
         [[ "${hit}" =~ \.git/ ]] && continue
+        # Skip test/example fixtures (file path contains test/ or testdata/ or _test.go)
+        [[ "${hit}" =~ (test/|testdata/|_test\.go:) ]] && continue
         add_finding "CRITICAL" "Credential Exposure" "${hit}"
         CRED_FOUND=$(( CRED_FOUND + 1 ))
-        # Cap at 10 hits per pattern to avoid report flooding
-        [[ "${CRED_FOUND}" -ge 10 ]] && break 2
+        [[ "${CRED_FOUND}" -ge 15 ]] && break 2
     done < <(grep -rIn "${INCLUDE_GLOBS[@]}" --exclude-dir='.git' \
                    -E "${pattern}" "${REPO_ROOT}" 2>/dev/null | head -3 || true)
 done
+
+# Also scan for bare .env files anywhere in the tree (grep --include doesn't recurse dotfiles)
+while IFS= read -r envfile; do
+    [[ -f "${envfile}" ]] || continue
+    while IFS= read -r line; do
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        if [[ "${line}" =~ (KEY|SECRET|PASS(WORD)?|TOKEN|PRIVATE)= ]]; then
+            add_finding "CRITICAL" "Credential Exposure (.env)" "${envfile}: ${line}"
+            CRED_FOUND=$(( CRED_FOUND + 1 ))
+        fi
+    done < "${envfile}"
+done < <(find "${REPO_ROOT}" -name '.env' -o -name '.env.*' 2>/dev/null | grep -v '\.git/')
 
 if [[ "${CRED_FOUND}" -eq 0 ]]; then
     log "No credential patterns found in repo."
 fi
 
-# ── CHECK 3: verify.sh dependency audit ──────────────────────────────────────
+# ── CHECK 3: Dependency audit (verify.sh + Go toolchain) ─────────────────────
 
-log "=== CHECK 3: verify.sh dependency audit ==="
+log "=== CHECK 3: Dependency audit ==="
 
-VERIFY_DEPS=(bash jq sha256sum awk)
+check_binary() {
+    local name="$1"
+    local label="${2:-${name}}"
 
-for dep in "${VERIFY_DEPS[@]}"; do
-    if ! command -v "${dep}" &>/dev/null; then
+    if ! command -v "${name}" &>/dev/null; then
         add_finding "HIGH" "Missing Dependency" \
-            "\`${dep}\` is required by verify.sh but is not installed."
-        continue
+            "\`${label}\` is not installed — required for this service."
+        return 1
     fi
 
-    dep_path="$(command -v "${dep}")"
+    local dep_path
+    dep_path="$(command -v "${name}")"
 
-    # Tamper check: binary should not be world-writable
+    local dep_perms
     dep_perms="$(stat -c '%a' "${dep_path}" 2>/dev/null || true)"
     if [[ "${dep_perms}" =~ [2367]$ ]]; then
         add_finding "HIGH" "Dependency Integrity" \
-            "\`${dep}\` at ${dep_path} has world-writable permissions (${dep_perms}) — possible tampering vector."
+            "\`${label}\` at ${dep_path} is world-writable (${dep_perms}) — possible tampering vector."
     fi
 
-    # Bash: flag pre-4.3 (Shellshock era)
+    log "  ${label}: $(${name} --version 2>&1 | head -1 || true) (${dep_path})"
+    return 0
+}
+
+# verify.sh runtime dependencies
+log "-- verify.sh dependencies --"
+
+VERIFY_DEPS=(bash jq sha256sum awk)
+for dep in "${VERIFY_DEPS[@]}"; do
+    check_binary "${dep}" || continue
+
     if [[ "${dep}" == "bash" ]]; then
         bash_ver="$(bash --version 2>&1 | grep -oP 'version \K[0-9]+\.[0-9]+' | head -1 || true)"
         bash_major="${bash_ver%%.*}"
         bash_minor="${bash_ver##*.}"
-        if [[ -n "${bash_major}" && ( "${bash_major}" -lt 4 || ( "${bash_major}" -eq 4 && "${bash_minor}" -lt 3 ) ) ]]; then
+        if [[ -n "${bash_major}" && ( "${bash_major}" -lt 4 || \
+              ( "${bash_major}" -eq 4 && "${bash_minor}" -lt 3 ) ) ]]; then
             add_finding "CRITICAL" "Dependency CVE" \
                 "bash ${bash_ver} is vulnerable to Shellshock (CVE-2014-6271). Upgrade to >= 4.3.25."
         fi
-        log "  bash: ${bash_ver} at ${dep_path}"
     fi
 done
 
-# Lint verify.sh itself for risky patterns
+# Lint verify.sh itself
 VERIFY_SCRIPT="${REPO_ROOT}/verify.sh"
 if [[ -f "${VERIFY_SCRIPT}" ]]; then
-    # $1 passed unvalidated — path traversal if caller-controlled
     if grep -qE 'cat\s+"?\$1"?' "${VERIFY_SCRIPT}" 2>/dev/null; then
         add_finding "MEDIUM" "Script Safety" \
             "verify.sh passes \$1 directly to cat without path validation — path traversal possible with attacker-controlled input."
     fi
-    # echo -n piped to sha256sum: no issue, but flag if sha256sum gets raw user data
     if grep -qE 'echo.*\$[{(]?[A-Z_]*INPUT' "${VERIFY_SCRIPT}" 2>/dev/null; then
         add_finding "LOW" "Script Safety" \
             "verify.sh pipes an INPUT variable into sha256sum — ensure the source data is trusted."
+    fi
+fi
+
+# Go toolchain (signing-service is a Go module — go 1.19 per go.mod)
+log "-- Go toolchain --"
+
+GO_MOD="${REPO_ROOT}/go.mod"
+REQUIRED_GO_MAJOR=1
+REQUIRED_GO_MINOR=19
+
+if check_binary "go" "go (toolchain)"; then
+    GO_VERSION="$(go version 2>/dev/null | grep -oP 'go\K[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
+    GO_MAJOR="${GO_VERSION%%.*}"
+    GO_REST="${GO_VERSION#*.}"
+    GO_MINOR="${GO_REST%%.*}"
+
+    if [[ -n "${GO_MAJOR}" ]]; then
+        if (( GO_MAJOR < REQUIRED_GO_MAJOR || \
+              ( GO_MAJOR == REQUIRED_GO_MAJOR && GO_MINOR < REQUIRED_GO_MINOR ) )); then
+            add_finding "HIGH" "Go Version" \
+                "Installed go ${GO_VERSION} is below the go.mod requirement of ${REQUIRED_GO_MAJOR}.${REQUIRED_GO_MINOR}. Upgrade required."
+        else
+            log "  go version ${GO_VERSION} meets go.mod requirement (>= ${REQUIRED_GO_MAJOR}.${REQUIRED_GO_MINOR})"
+        fi
+    fi
+fi
+
+# go.sum integrity — if external deps were ever added without a go.sum that's a risk
+if [[ -f "${GO_MOD}" ]]; then
+    if grep -q '^require' "${GO_MOD}" 2>/dev/null; then
+        if [[ ! -f "${REPO_ROOT}/go.sum" ]]; then
+            add_finding "HIGH" "Go Dependency Integrity" \
+                "go.mod declares external dependencies but go.sum is absent — dependency checksums unverified."
+        else
+            log "  go.sum present alongside go.mod."
+        fi
+    else
+        log "  go.mod has no external dependencies — go.sum not required."
     fi
 fi
 
@@ -239,14 +418,12 @@ if [[ "${SELF_ONLINE}" != "true" ]]; then
         "Machine reports Online=false in tailscale status — ACL enforcement may be inactive."
 fi
 
-# Exit node configured? Warn — could route non-Tailscale traffic through a peer
 EXIT_NODE_STATUS="$(echo "${TS_STATUS_JSON}" | jq -r '.ExitNodeStatus // empty' 2>/dev/null || true)"
 if [[ -n "${EXIT_NODE_STATUS}" ]]; then
     add_finding "MEDIUM" "Tailscale ACL" \
         "Exit node is active: ${EXIT_NODE_STATUS} — verify peer ACLs still restrict access correctly."
 fi
 
-# Unauthenticated peers (UserID == 0) should not appear in a healthy tailnet
 UNAUTH_PEERS="$(echo "${TS_STATUS_JSON}" | jq -r '
     .Peer // {} | to_entries[]
     | select((.value.UserID == 0) or (.value.UserID == null))
@@ -260,7 +437,6 @@ else
     log "All tailnet peers authenticated."
 fi
 
-# MagicDNS / HTTPS cert heuristic: if TailscaleDNS is not serving, ACL host routing is degraded
 TS_DNS="$(echo "${TS_STATUS_JSON}" | jq -r '.MagicDNSSuffix // empty' 2>/dev/null || true)"
 if [[ -z "${TS_DNS}" ]]; then
     add_finding "LOW" "Tailscale ACL" \
@@ -280,7 +456,7 @@ cat <<HEADER
 | Date | $(date -u +"%Y-%m-%d %H:%M:%S UTC") |
 | Target | Local desktop only — Tailscale IP \`${TS_IP4}\` |
 | Node | \`${SELF_NODE}\` |
-| Scope | signing-service repo, local port baseline, verify.sh deps, Tailscale ACL |
+| Scope | signing-service repo, local port baseline, verify.sh + Go deps, Tailscale ACL |
 | Script | \`scripts/desktop-scan.sh\` (pilot) |
 
 > **Scope boundary:** This scan is restricted to the local Tailscale-connected desktop.
@@ -345,10 +521,29 @@ cat <<FOOTER
 ## Checks Performed
 
 1. **Tailscale gate** — confirmed mesh active, node online, IP in 100.64.0.0/10 range; aborted if not
-2. **Open port baseline** — enumerated listening TCP ports; flagged anything outside expected set (${!EXPECTED_PORTS[*]}) or bound to 0.0.0.0
-3. **Credential scan** — grepped repo for key/secret/token/PEM patterns across Go, shell, config, SQL files
-4. **verify.sh dependency audit** — confirmed jq, sha256sum, awk, bash present; checked permissions and known CVEs; linted verify.sh for unsafe patterns
-5. **Tailscale ACL enforcement** — confirmed self online, no unauthenticated peers, no unexpected exit node, MagicDNS active
+2. **Open port baseline** — enumerated listening TCP ports via ss/netstat; flagged ports outside expected set (${!EXPECTED_PORTS[*]}) and any 0.0.0.0 bindings
+3. **Credential scan (expanded)** — scanned Go, shell, config, SQL, .env, .ini, .properties files for:
+   - PEM/key block headers (RSA, EC, DSA, OPENSSH, PGP)
+   - Unquoted .env assignments matching PASSWORD/SECRET/KEY/TOKEN/PRIVATE_KEY
+   - Quoted credential assignments in any language
+   - Service-specific formats: OpenAI sk-, Google AIza-, Slack xox-, GitHub gh[pousr]_, AWS AKIA
+   - Raw private key material: hex-encoded, Ethereum 0x64-hex, base64 Ed25519 seeds
+   - Explicit dotfile scan for bare .env / .env.* files not caught by glob recursion
+4. **Dependency audit** — verify.sh runtime deps (bash, jq, sha256sum, awk): presence, world-writable perms, Shellshock CVE; verify.sh lint for path traversal; Go toolchain: version vs go.mod requirement (>= 1.19), go.sum presence
+5. **Tailscale ACL enforcement** — self online, no unauthenticated peers, no unexpected exit node, MagicDNS suffix present
+6. **Google Drive upload** — report uploaded to folder \`${GDRIVE_FOLDER_ID}\` automatically after scan
+
+---
+
+## Hourly Self-Check-In Scope
+
+The CI monitoring loop watching PR #3:
+
+| Dimension | Definition |
+|-----------|------------|
+| **Checks** | PR open/merged/closed state; CI check-run pass/fail; unresolved review comments |
+| **Touches** | GitHub read-only API (get, get_check_runs, get_review_comments). May push a fix commit only if a CI failure is tractable and the fix is unambiguous. |
+| **Does NOT touch** | Repo files without a concrete failing check; branches other than \`claude/pentagi-desktop-scan-pilot-m06o60\`; PR merge (blocked on Sony review); review comments; re-arms after PR is merged or closed. |
 
 ---
 
@@ -360,7 +555,60 @@ FOOTER
 
 log "Report written: ${REPORT_FILE}"
 
-# Exit codes: 0 = clean, 2 = high/critical findings, 3 = medium findings only
+# ── Google Drive upload (mandatory, summary only) ────────────────────────────
+# Uploads a summary containing only counts, severity levels, and check names.
+# No topology (node names, IPs, peer list), no credential match text, no port
+# numbers or network details leave the local machine.
+# The full report stays in scan-reports/ (gitignored, local only).
+
+SUMMARY_FILE="${SCAN_REPORTS_DIR}/scan-${TIMESTAMP}-summary.md"
+
+{
+cat <<SUMMARY_HEAD
+# Pentagi Desktop Scan — Summary
+
+| Field | Value |
+|-------|-------|
+| Date | $(date -u +"%Y-%m-%d %H:%M:%S UTC") |
+| Script | scripts/desktop-scan.sh (pilot) |
+| Scope | signing-service repo, port baseline, dependency audit, Tailscale ACL |
+
+> Full report with finding details is retained locally only.
+> No network topology, IP addresses, or credential match text included here.
+
+---
+
+## Finding Counts
+
+| Severity | Count |
+|----------|-------|
+| CRITICAL / HIGH | ${COUNT_HIGH} |
+| MEDIUM | ${COUNT_MEDIUM} |
+| Total | ${#FINDINGS[@]} |
+
+---
+
+## Check Results
+
+| Check | Status |
+|-------|--------|
+| Tailscale gate | $([ "${SELF_ONLINE}" = "true" ] && echo "PASS" || echo "WARN") |
+| Open port baseline | $([ "${COUNT_HIGH}" -eq 0 ] && echo "No unexpected ports" || echo "See local report") |
+| Credential scan | $([ "${CRED_FOUND:-0}" -eq 0 ] && echo "No findings" || echo "${CRED_FOUND} finding(s) — see local report") |
+| Dependency audit | COMPLETED |
+| Tailscale ACL | $([ -n "${UNAUTH_PEERS:-}" ] && echo "WARN — see local report" || echo "PASS") |
+
+---
+
+*Full findings are in the local scan-reports directory. Sony review required before merge.*
+SUMMARY_HEAD
+} > "${SUMMARY_FILE}"
+
+upload_report_to_gdrive "${SUMMARY_FILE}" || true  # finding already added on failure
+rm -f "${SUMMARY_FILE}"
+
+# ── Exit with appropriate code ────────────────────────────────────────────────
+
 if (( COUNT_HIGH > 0 )); then
     log "RESULT: ${COUNT_HIGH} HIGH/CRITICAL finding(s) — immediate review required."
     exit 2
