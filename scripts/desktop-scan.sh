@@ -328,11 +328,14 @@ check_binary() {
     local dep_path
     dep_path="$(command -v "${name}")"
 
-    local dep_perms
-    dep_perms="$(stat -c '%a' "${dep_path}" 2>/dev/null || true)"
+    # Resolve symlinks before checking permissions. On Linux, symlinks always
+    # show lrwxrwxrwx — only the target file's permissions are meaningful.
+    local dep_target dep_perms
+    dep_target="$(readlink -f "${dep_path}" 2>/dev/null || echo "${dep_path}")"
+    dep_perms="$(stat -c '%a' "${dep_target}" 2>/dev/null || true)"
     if [[ "${dep_perms}" =~ [2367]$ ]]; then
         add_finding "HIGH" "Dependency Integrity" \
-            "\`${label}\` at ${dep_path} is world-writable (${dep_perms}) — possible tampering vector."
+            "\`${label}\` at ${dep_path} (→ ${dep_target}) is world-writable (${dep_perms}) — possible tampering vector."
     fi
 
     log "  ${label}: $(${name} --version 2>&1 | head -1 || true) (${dep_path})"
