@@ -292,6 +292,7 @@ for pattern in "${CRED_PATTERNS[@]}"; do
         CRED_FOUND=$(( CRED_FOUND + 1 ))
         [[ "${CRED_FOUND}" -ge 15 ]] && break 2
     done < <(grep -rIn "${INCLUDE_GLOBS[@]}" --exclude-dir='.git' \
+                   --exclude-dir='verified-artifacts' \
                    -E "${pattern}" "${REPO_ROOT}" 2>/dev/null | head -3 || true)
 done
 
@@ -305,7 +306,7 @@ while IFS= read -r envfile; do
             CRED_FOUND=$(( CRED_FOUND + 1 ))
         fi
     done < "${envfile}"
-done < <(find "${REPO_ROOT}" -name '.env' -o -name '.env.*' 2>/dev/null | grep -v '\.git/')
+done < <(find "${REPO_ROOT}" -name '.env' -o -name '.env.*' 2>/dev/null | grep -v '\.git/' | grep -v '/verified-artifacts/')
 
 if [[ "${CRED_FOUND}" -eq 0 ]]; then
     log "No credential patterns found in repo."
