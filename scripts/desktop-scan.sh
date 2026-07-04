@@ -192,8 +192,12 @@ log "=== GATE PASSED — beginning scan (local machine only) ==="
 log "=== CHECK 1: Open port baseline ==="
 
 # Expected listening ports for this host. Adjust as the service topology changes.
-# 8080 = signing-service API (Tailscale-internal only)
-declare -A EXPECTED_PORTS=([8080]=1)
+# 22    = SSH (restricted to tailscale0 interface only)
+# 53    = systemd-resolve (loopback only)
+# 8080  = signing-service API (Tailscale-internal only)
+# 47688 = tailscaled
+# 64170 = tailscaled IPv6
+declare -A EXPECTED_PORTS=([22]=1 [53]=1 [8080]=1 [47688]=1 [64170]=1)
 
 OPEN_PORTS=()
 
