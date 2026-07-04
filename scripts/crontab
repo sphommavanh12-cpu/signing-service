@@ -1,0 +1,3 @@
+# AXM seal purge — runs weekly, Sunday 02:00
+# Sony to confirm deploy location before activating.
+0 2 * * 0  $HOME/scripts/axm-seal-purge.sh >> $HOME/logs/axm-seal-purge.log 2>&1
