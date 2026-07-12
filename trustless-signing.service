@@ -25,6 +25,7 @@ SystemCallErrorNumber=EPERM
 
 WatchdogSec=30s
 LoadCredential=signing_passphrase:/etc/signing-service/passphrase.key
+EnvironmentFile=/etc/signing-service/github.env
 
 ExecStart=/usr/local/bin/signing-service \\
   --bind 100.118.135.73 \\
