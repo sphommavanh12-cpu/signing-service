@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"signing-service/internal/api"
 	"signing-service/internal/crypto"
 	"signing-service/internal/github"
@@ -27,8 +28,12 @@ func main() {
 	port := flag.Int("port", 9999, "Port for signing requests")
 	statusPort := flag.Int("status-port", 9998, "Port for status endpoint")
 	keyVersion := flag.String("key-version", "v1", "Key version identifier")
-	githubToken := flag.String("github-token", "", "GitHub API token (optional)")
+	githubToken := flag.String("github-token", "", "GitHub API token (falls back to GITHUB_TOKEN env var)")
 	flag.Parse()
+
+	if *githubToken == "" {
+		*githubToken = os.Getenv("GITHUB_TOKEN")
+	}
 
 	if *bind == "0.0.0.0" || *bind == "::" {
 		log.Fatal("bind address cannot be a wildcard (0.0.0.0 or ::). Must be a specific Tailscale IP.")
