@@ -1,5 +1,5 @@
 ════════════════════════════════════════════════════════════
-AMD-[TBD] — ARCHITECTURE-FIRST GATE RULE
+AMD-036 — ARCHITECTURE-FIRST GATE RULE
 ════════════════════════════════════════════════════════════
 AXM Contracting LLC — AXIOM Governance System
 Status: SONY LOCKED — signature confirmed (Section 9)
@@ -192,6 +192,6 @@ Gate Ruling: SONY LOCKED — signature confirmed. Pending only AMD
 number assignment and repo push confirmation before final seal.
 
 ────────────────────────────────────────────────────────────
-AXM Contracting LLC — AXIOM Governance System — AMD-[TBD] v1.0
+AXM Contracting LLC — AXIOM Governance System — AMD-036 v1.0
 CONFIDENTIAL
 ────────────────────────────────────────────────────────────
