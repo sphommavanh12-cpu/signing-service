@@ -70,4 +70,4 @@ Not a blueprint — a sequencing recommendation for what Phase 3 should scope, i
 
 ---
 
-*This document is a classification, not a blueprint. Phase 3 (architecture proposal) requires its own dual peer review and Sony lock before any implementation, per the Architecture-First Gate Rule (merged, docs/AMD-TBD-architecture-first-gate-rule.md).*
+*This document is a classification, not a blueprint. Phase 3 (architecture proposal) requires its own dual peer review and Sony lock before any implementation, per the Architecture-First Gate Rule (merged, docs/AMD-036-architecture-first-gate-rule.md).*
