@@ -1,0 +1,41 @@
+name: container-scan
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  trivy-scan:
+    name: Trivy scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: "ghcr.io/jmasarweh/unifi-log-insight:latest"
+          format: "table"
+          severity: "HIGH,CRITICAL"
+          exit-code: "1"
+          ignore-unfixed: true
+
+  grype-scan:
+    name: Grype scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Grype vulnerability scanner
+        uses: anchore/scan-action@v4
+        with:
+          image: "ghcr.io/jmasarweh/unifi-log-insight:latest"
+          fail-build: true
+          severity-cutoff: high
