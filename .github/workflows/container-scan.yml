@@ -33,25 +33,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Update Grype vulnerability database
+      - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v0.80.0
-          grype db update
+          grype version
 
-      - name: Run Grype vulnerability scanner
-        uses: anchore/scan-action@v4
-        with:
-          image: "ghcr.io/jmasarweh/unifi-log-insight:latest"
-          fail-build: true
-          severity-cutoff: high
-          only-fixed: true
+      - name: Update Grype vulnerability database
+        run: grype db update
+
+      - name: Run Grype vulnerability scan (gating)
+        run: |
+          grype ghcr.io/jmasarweh/unifi-log-insight:latest \
+            --fail-on high \
+            --only-fixed \
+            -o table
 
       - name: Grype table output (visibility only)
         if: always()
-        uses: anchore/scan-action@v4
-        with:
-          image: "ghcr.io/jmasarweh/unifi-log-insight:latest"
-          fail-build: false
-          severity-cutoff: high
-          only-fixed: true
-          output-format: table
+        run: |
+          grype ghcr.io/jmasarweh/unifi-log-insight:latest \
+            --only-fixed \
+            -o table || true
