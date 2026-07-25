@@ -39,7 +39,7 @@ jobs:
           grype db update
 
       - name: Run Grype vulnerability scanner
-        uses: anchore/scan-action@v4
+        uses: anchore/scan-action@v7
         with:
           image: "ghcr.io/jmasarweh/unifi-log-insight:latest"
           fail-build: true
@@ -48,7 +48,7 @@ jobs:
 
       - name: Grype table output (visibility only)
         if: always()
-        uses: anchore/scan-action@v4
+        uses: anchore/scan-action@v7
         with:
           image: "ghcr.io/jmasarweh/unifi-log-insight:latest"
           fail-build: false
