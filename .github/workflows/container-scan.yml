@@ -35,7 +35,7 @@ jobs:
 
       - name: Update Grype vulnerability database
         run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v0.114.0
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v0.80.0
           grype db update
 
       - name: Run Grype vulnerability scanner
