@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: "ghcr.io/jmasarweh/unifi-log-insight:latest"
           format: "table"
@@ -39,3 +39,4 @@ jobs:
           image: "ghcr.io/jmasarweh/unifi-log-insight:latest"
           fail-build: true
           severity-cutoff: high
+          only-fixed: true
