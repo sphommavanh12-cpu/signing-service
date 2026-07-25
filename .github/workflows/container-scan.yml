@@ -33,6 +33,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Update Grype vulnerability database
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v0.114.0
+          grype db update
+
       - name: Run Grype vulnerability scanner
         uses: anchore/scan-action@v4
         with:
