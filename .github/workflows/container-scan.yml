@@ -42,6 +42,7 @@ jobs:
           only-fixed: true
 
       - name: Grype table output (visibility only)
+        if: always()
         uses: anchore/scan-action@v4
         with:
           image: "ghcr.io/jmasarweh/unifi-log-insight:latest"
