@@ -1,0 +1,194 @@
+# ═══════════════════════════════════════════════════════════════
+# Supply Chain Security Pipeline
+# Covers: malicious package detection, vuln scanning,
+#         static analysis, and release artifact signing.
+#
+# Required secrets (Settings → Secrets → Actions):
+#   SOCKET_SECURITY_API_KEY  – from app.socket.dev (free for public repos)
+#   SNYK_TOKEN               – from app.snyk.io   (free tier)
+#
+# No secrets needed for: npm audit, Semgrep, Cosign (uses GitHub OIDC)
+# ═══════════════════════════════════════════════════════════════
+
+name: Supply Chain Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  release:
+    types: [published]
+
+permissions:
+  contents: read        # default: least privilege
+  security-events: write  # allows uploading SARIF results to GitHub Security tab
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1 — Socket.dev
+  # Catches malicious behavior BEFORE packages are installed:
+  # typosquatting, hidden install scripts, obfuscated code,
+  # dependency confusion, and the FakeGit/SmartLoader pattern.
+  # ─────────────────────────────────────────────────────────────
+  socket-scan:
+    name: "Socket.dev – Malicious Package Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Socket CLI
+        run: npm install -g @socketsecurity/cli
+
+      - name: Run Socket scan
+        # --strict blocks the pipeline if high-risk issues are found.
+        # Remove --strict to get warnings only (useful while onboarding).
+        run: socket scan --strict .
+        env:
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2 — npm audit
+  # Built-in, zero-config CVE check against npm's advisory DB.
+  # Runs independently so it doesn't wait on Socket.
+  # ─────────────────────────────────────────────────────────────
+  npm-audit:
+    name: "npm audit – Known CVE Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        # ci is safer than install: uses lock file exactly, fails on mismatch
+        run: npm ci
+
+      - name: Run npm audit
+        # --audit-level=high: fail only on high/critical. Use 'moderate' to be stricter.
+        run: npm audit --audit-level=high
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 3 — Snyk
+  # Deeper dependency scanning with fix suggestions and license
+  # checks. Complements npm audit with a broader advisory DB.
+  # ─────────────────────────────────────────────────────────────
+  snyk:
+    name: "Snyk – Vulnerability & License Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Snyk scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          # Fail on high/critical only. Change to 'medium' to tighten.
+          args: --severity-threshold=high
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 4 — Semgrep
+  # Static analysis: catches hardcoded secrets, missing auth
+  # checks, injection sinks, and AI-generated code anti-patterns
+  # (the patterns flagged in today's threat report).
+  # ─────────────────────────────────────────────────────────────
+  semgrep:
+    name: "Semgrep – Static Analysis"
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        # --config auto pulls the best community rules for your stack.
+        # Add --config p/secrets to specifically target hardcoded creds.
+        # Add --config p/javascript for JS-specific rules.
+        run: |
+          semgrep scan \
+            --config auto \
+            --config p/secrets \
+            --error \
+            --sarif \
+            --output semgrep-results.sarif
+
+      - name: Upload results to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-results.sarif
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 5 — Cosign (release only)
+  # Signs the packed npm tarball using keyless OIDC signing —
+  # no private key to manage or leak. The signature is anchored
+  # to GitHub's OIDC identity and stored in Rekor (public log).
+  # Consumers can verify with: cosign verify-blob <tarball>
+  # ─────────────────────────────────────────────────────────────
+  sign-release:
+    name: "Cosign – Sign Release Artifact"
+    runs-on: ubuntu-latest
+    # Only runs when all scan jobs pass AND this is a published release
+    needs: [socket-scan, npm-audit, snyk, semgrep]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    permissions:
+      contents: write   # to upload signed artifact back to the release
+      id-token: write   # required for keyless OIDC signing with Cosign
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pack npm tarball
+        run: npm pack
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign tarball (keyless)
+        run: |
+          TARBALL=$(ls *.tgz | head -1)
+          echo "Signing: $TARBALL"
+          cosign sign-blob \
+            --yes \
+            "$TARBALL" \
+            --bundle "${TARBALL}.bundle"
+          echo "TARBALL=$TARBALL" >> $GITHUB_ENV
+
+      - name: Upload signature bundle to GitHub Release
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "${{ env.TARBALL }}" \
+            "${{ env.TARBALL }}.bundle"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
